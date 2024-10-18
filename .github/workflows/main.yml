@@ -8,6 +8,13 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**/*.cpp'
+      - '**/CMakeLists.txt'
+      - '**/*.sh'
+      - Dockerfile
+
+  workflow_dispatch: 
 
 jobs:
 
