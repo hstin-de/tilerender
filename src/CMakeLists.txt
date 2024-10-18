@@ -9,7 +9,7 @@ set(CMAKE_VISIBILITY_INLINES_HIDDEN 1)
 target_include_directories(
     tilerender
     PRIVATE
-        ${CMAKE_SOURCE_DIR}/external/maplibre-gl-native/include
+        ${CMAKE_SOURCE_DIR}/maplibre-native/include
 )
 
 target_link_libraries(
