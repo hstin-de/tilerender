@@ -58,7 +58,7 @@ If you prefer to run tilerender without Docker, follow these steps:
 1. **Clone the Repository:**
 
    ```bash
-   git clone --recurse-submodules https://github.com/acalcutt/tilerender.git
+   git clone --recurse-submodules https://github.com/hstin-de/tilerender.git
    cd tilerender
    ```
 
