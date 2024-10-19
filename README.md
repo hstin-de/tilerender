@@ -58,7 +58,7 @@ If you prefer to run tilerender without Docker, follow these steps:
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/hstin-de/tilerender.git
+   git clone --recurse-submodules https://github.com/hstin-de/tilerender.git
    cd tilerender
    ```
 
@@ -87,6 +87,7 @@ If you prefer to run tilerender without Docker, follow these steps:
     -DCMAKE_BUILD_TYPE=RelWithDebInfo \
     -DMLN_WITH_CLANG_TIDY=OFF \
     -DMLN_WITH_COVERAGE=OFF \
+    -DMLN_WITH_PMTILES=ON \
     -DMLN_DRAWABLE_RENDERER=ON \
     -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
     
