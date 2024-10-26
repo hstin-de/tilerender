@@ -23,30 +23,12 @@
 #include <webp/encode.h>
 #include <filesystem>
 
+#include "image_encoding.hpp"
+
+
+
+
 namespace fs = std::filesystem;
-
-namespace mbgl
-{
-
-    std::string encodeWebP(const PremultipliedImage &pre)
-    {
-        const auto src = util::unpremultiply(pre.clone());
-
-        uint8_t *output_data = nullptr;
-        size_t output_size = WebPEncodeRGBA(src.data.get(), src.size.width, src.size.height, src.stride(), 75.0f, &output_data);
-
-        if (output_size == 0 || output_data == nullptr)
-        {
-            throw std::runtime_error("WebP encoding failed");
-        }
-
-        std::string webpData(reinterpret_cast<char *>(output_data), output_size);
-        WebPFree(output_data);
-
-        return webpData;
-    }
-
-} // namespace mbgl
 
 // Utility function for string formatting
 template <typename... Args>
@@ -93,7 +75,7 @@ Coordinates calculateNormalizedCenterCoords(int x, int y, int zoom)
     return {centerLon, centerLat};
 }
 
-void initializeDatabase(const char *dbPath)
+void initializeDatabase(const char *dbPath, ImageFormat imageFormat)
 {
     sqlite3 *db;
     int rc = sqlite3_open(dbPath, &db);
@@ -125,13 +107,13 @@ void initializeDatabase(const char *dbPath)
         std::cerr << "SQL error (create tile index): " << sqlite3_errmsg(db) << std::endl;
     }
 
-    const char *metadataInsertSQL = "INSERT OR REPLACE INTO metadata (name, value) VALUES "
+    std::string metadataInsertSQL = "INSERT OR REPLACE INTO metadata (name, value) VALUES "
                                     "('name', 'raster'), "
                                     "('type', 'baselayer'), "
                                     "('version', '1.0'), "
-                                    "('description', 'rendered vector tiles to webp'), "
-                                    "('format', 'webp');";
-    rc = sqlite3_exec(db, metadataInsertSQL, nullptr, nullptr, nullptr);
+                                    "('description', 'rendered vector tiles to " + imageString(imageFormat) + "'), "
+                                    "('format', '" + imageString(imageFormat) + "');";
+    rc = sqlite3_exec(db, metadataInsertSQL.c_str(), nullptr, nullptr, nullptr);
     if (rc != SQLITE_OK)
     {
         std::cerr << "SQL error (insert metadata): " << sqlite3_errmsg(db) << std::endl;
@@ -140,7 +122,7 @@ void initializeDatabase(const char *dbPath)
     sqlite3_close(db);
 }
 
-void renderTiles(int processId, int numProcesses, int maxZoom, const char *style_url, const char *dbPath)
+void renderTiles(int processId, int numProcesses, int maxZoom, const char *style_url, ImageFormat imageFormat, const char *dbPath)
 {
     double pixelRatio = 1.0;
     uint32_t width = 512;
@@ -209,14 +191,31 @@ void renderTiles(int processId, int numProcesses, int maxZoom, const char *style
                                .withZoom(zoom));
 
                 auto image = frontend.render(map).image;
-                auto webpData = encodeWebP(image);
+                std::string encodedData;
+
+                if (imageFormat == ImageFormat::WEBP)
+                {
+                    encodedData = encodeWebP(image);
+                }
+                else if (imageFormat == ImageFormat::JPEG)
+                {
+                    encodedData = encodeJPEG(image);
+                }
+                else if (imageFormat == ImageFormat::PNG)
+                {
+                    encodedData = encodePNG(image);
+                }
+                else
+                {
+                    throw std::runtime_error("Invalid image format");
+                }
 
                 int tmsY = (1 << zoom) - 1 - y;
 
                 rc = sqlite3_bind_int(stmt, 1, zoom);
                 rc |= sqlite3_bind_int(stmt, 2, x);
                 rc |= sqlite3_bind_int(stmt, 3, tmsY);
-                rc |= sqlite3_bind_blob(stmt, 4, webpData.data(), webpData.size(), SQLITE_TRANSIENT);
+                rc |= sqlite3_bind_blob(stmt, 4, encodedData.data(), encodedData.size(), SQLITE_TRANSIENT);
 
                 if (rc != SQLITE_OK)
                 {
@@ -245,7 +244,7 @@ void renderTiles(int processId, int numProcesses, int maxZoom, const char *style
     sqlite3_close(db);
 }
 
-void mergeDatabases(const std::vector<std::string> &dbPaths, const char *outputDbPath)
+void mergeDatabases(const std::vector<std::string> &dbPaths, const char *outputDbPath, ImageFormat imageFormat)
 {
     sqlite3 *outDb;
     int rc = sqlite3_open(outputDbPath, &outDb);
@@ -256,7 +255,7 @@ void mergeDatabases(const std::vector<std::string> &dbPaths, const char *outputD
         exit(1);
     }
 
-    initializeDatabase(outputDbPath);
+    initializeDatabase(outputDbPath, imageFormat);
 
     rc = sqlite3_exec(outDb, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
     if (rc != SQLITE_OK)
@@ -347,10 +346,11 @@ int main(int argc, char *argv[])
     int maxZoom = 5;
     int numProcesses = std::thread::hardware_concurrency();
     std::string outputDbPath = "./tiles.mbtiles";
+    ImageFormat imageFormat = ImageFormat::WEBP;
 
     // Command-line options parsing
     int opt;
-    while ((opt = getopt(argc, argv, "s:z:p:o:")) != -1)
+    while ((opt = getopt(argc, argv, "s:z:p:o:f:")) != -1)
     {
         switch (opt)
         {
@@ -366,8 +366,27 @@ int main(int argc, char *argv[])
         case 'o':
             outputDbPath = optarg;
             break;
+        case 'f':
+            if (std::string(optarg) == "webp")
+            {
+                imageFormat = ImageFormat::WEBP;
+            }
+            else if (std::string(optarg) == "jpg")
+            {
+                imageFormat = ImageFormat::JPEG;
+            }
+            else if (std::string(optarg) == "png")
+            {
+                imageFormat = ImageFormat::PNG;
+            }
+            else
+            {
+                std::cerr << "Error: invalid image format specified, must be one of 'webp', 'jpg', or 'png'\n";
+                return 1;
+            }
+            break;
         default:
-            std::cerr << "Usage: " << argv[0] << " -s style_url [-z maxZoom] [-p numProcesses] [-o outputDbPath]\n";
+            std::cerr << "Usage: " << argv[0] << " -s style_url [-z maxZoom] [-p numProcesses] [-o outputDbPath] [-f imageFormat]\n";
             return 1;
         }
     }
@@ -383,15 +402,15 @@ int main(int argc, char *argv[])
         style_url = "file://" + style_url;
     }
 
-        
     std::cout << "===================================" << std::endl;
     std::cout << "Style URL: " << style_url << std::endl;
     std::cout << "Max Zoom: " << maxZoom << std::endl;
     std::cout << "Number of Processes: " << numProcesses << std::endl;
+    std::cout << "Image Format: " << imageString(imageFormat) << std::endl;
     std::cout << "Output Database: " << outputDbPath << std::endl;
-    std::cout << "===================================" << std::endl << std::endl;
+    std::cout << "===================================" << std::endl
+              << std::endl;
 
-    
     std::cout << ">>> Starting Rendering" << std::endl;
 
     fs::path outputPath = fs::path(outputDbPath).parent_path();
@@ -407,8 +426,8 @@ int main(int argc, char *argv[])
         pid_t pid = fork();
         if (pid == 0)
         {
-            initializeDatabase(dbPath.c_str());
-            renderTiles(processId, numProcesses, maxZoom, style_url.c_str(), dbPath.c_str());
+            initializeDatabase(dbPath.c_str(), imageFormat);
+            renderTiles(processId, numProcesses, maxZoom, style_url.c_str(), imageFormat, dbPath.c_str());
             exit(0);
         }
         else if (pid > 0)
@@ -434,7 +453,7 @@ int main(int argc, char *argv[])
     std::chrono::duration<double> elapsedTime = endTime - startTime;
     std::cout << ">>> Finished Rendering in " << elapsedTime.count() << " seconds." << std::endl;
 
-    mergeDatabases(dbPaths, outputDbPath.c_str());
+    mergeDatabases(dbPaths, outputDbPath.c_str(), imageFormat);
 
     for (const auto &dbPath : dbPaths)
     {
