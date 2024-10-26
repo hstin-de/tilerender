@@ -39,6 +39,11 @@ docker run --rm -it -v "$PWD:/data/" ghcr.io/hstin-de/tilerender -s <style_url> 
   Path for the output MBTiles where rendered tiles will be stored.  
   **Default:** `./tiles.mbtiles`
 
+- `-f` **(optional):**  
+  Image format for the output tiles.  
+  **Default:** `webp`
+  **Options:** `webp`, `jpg`, or `png`
+
 ### Example
 
 ```bash
