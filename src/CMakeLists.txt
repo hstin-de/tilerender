@@ -2,6 +2,8 @@ add_executable(
     tilerender
     main.cpp
     image_encoding.cpp
+    mbtiles.cpp
+    coordinates.cpp
 )
 
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)

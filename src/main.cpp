@@ -3,124 +3,20 @@
 #include <mbgl/util/image.hpp>
 #include <mbgl/util/run_loop.hpp>
 #include <mbgl/util/logging.hpp>
-#include <mbgl/util/image.hpp>
-#include <mbgl/util/premultiply.hpp>
-#include <mbgl/gfx/backend.hpp>
 #include <mbgl/gfx/headless_frontend.hpp>
 #include <mbgl/style/style.hpp>
 #include <iostream>
-#include <fstream>
 #include <string>
 #include <cstdint>
-#include <cmath>
-#include <stdexcept>
 #include <memory>
 #include <vector>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sqlite3.h>
-#include <dirent.h>
-#include <webp/encode.h>
-#include <filesystem>
 
 #include "image_encoding.hpp"
-
-
-
-
-namespace fs = std::filesystem;
-
-// Utility function for string formatting
-template <typename... Args>
-std::string string_format(const std::string &format, Args... args)
-{
-    int size_s = std::snprintf(nullptr, 0, format.c_str(), args...) + 1;
-    if (size_s <= 0)
-    {
-        throw std::runtime_error("Error during formatting.");
-    }
-    auto size = static_cast<size_t>(size_s);
-    std::unique_ptr<char[]> buf(new char[size]);
-    std::snprintf(buf.get(), size, format.c_str(), args...);
-    return std::string(buf.get(), buf.get() + size - 1);
-}
-
-struct Coordinates
-{
-    double lon;
-    double lat;
-};
-
-Coordinates convertTilesToCoordinates(int x, int y, int zoom)
-{
-    double n = std::pow(2.0, zoom);
-    double lon = (static_cast<double>(x) / n) * 360.0 - 180.0;
-    double latRad = std::atan(std::sinh(M_PI * (1.0 - (2.0 * static_cast<double>(y)) / n)));
-    double lat = latRad * 180.0 / M_PI;
-    return {lon, lat};
-}
-
-Coordinates calculateNormalizedCenterCoords(int x, int y, int zoom)
-{
-    Coordinates nw = convertTilesToCoordinates(x, y, zoom);
-    Coordinates se = convertTilesToCoordinates(x + 1, y + 1, zoom);
-
-    double mercatorNwY = std::log(std::tan(M_PI / 4.0 + (nw.lat * M_PI) / 360.0));
-    double mercatorSeY = std::log(std::tan(M_PI / 4.0 + (se.lat * M_PI) / 360.0));
-    double avgMercatorY = (mercatorNwY + mercatorSeY) / 2.0;
-    double centerLat = (std::atan(std::exp(avgMercatorY)) * 360.0) / M_PI - 90.0;
-
-    double centerLon = (nw.lon + se.lon) / 2.0;
-
-    return {centerLon, centerLat};
-}
-
-void initializeDatabase(const char *dbPath, ImageFormat imageFormat)
-{
-    sqlite3 *db;
-    int rc = sqlite3_open(dbPath, &db);
-    if (rc)
-    {
-        std::cerr << "Can't open database: " << sqlite3_errmsg(db) << std::endl;
-        sqlite3_close(db);
-        exit(1);
-    }
-
-    const char *createTilesTableSQL = "CREATE TABLE IF NOT EXISTS tiles (zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB);";
-    rc = sqlite3_exec(db, createTilesTableSQL, nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "SQL error (create tiles table): " << sqlite3_errmsg(db) << std::endl;
-    }
-
-    const char *createMetadataTableSQL = "CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT);";
-    rc = sqlite3_exec(db, createMetadataTableSQL, nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "SQL error (create metadata table): " << sqlite3_errmsg(db) << std::endl;
-    }
-
-    const char *createTileIndexSQL = "CREATE UNIQUE INDEX IF NOT EXISTS tile_index ON tiles (zoom_level, tile_column, tile_row);";
-    rc = sqlite3_exec(db, createTileIndexSQL, nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "SQL error (create tile index): " << sqlite3_errmsg(db) << std::endl;
-    }
-
-    std::string metadataInsertSQL = "INSERT OR REPLACE INTO metadata (name, value) VALUES "
-                                    "('name', 'raster'), "
-                                    "('type', 'baselayer'), "
-                                    "('version', '1.0'), "
-                                    "('description', 'rendered vector tiles to " + imageString(imageFormat) + "'), "
-                                    "('format', '" + imageString(imageFormat) + "');";
-    rc = sqlite3_exec(db, metadataInsertSQL.c_str(), nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "SQL error (insert metadata): " << sqlite3_errmsg(db) << std::endl;
-    }
-
-    sqlite3_close(db);
-}
+#include "mbtiles.hpp"
+#include "coordinates.hpp"
 
 void renderTiles(int processId, int numProcesses, int maxZoom, const char *style_url, ImageFormat imageFormat, const char *dbPath)
 {
@@ -185,29 +81,29 @@ void renderTiles(int processId, int numProcesses, int maxZoom, const char *style
             for (int y = processId; y < numOfTiles; y += numProcesses)
             {
 
-                Coordinates coords = calculateNormalizedCenterCoords(x, y, zoom);
+                LatLng center = calculateNormalizedCenterCoords(x, y, zoom);
+
                 map.jumpTo(CameraOptions()
-                               .withCenter(LatLng{coords.lat, coords.lon})
+                               .withCenter(center)
                                .withZoom(zoom));
 
                 auto image = frontend.render(map).image;
                 std::string encodedData;
 
-                if (imageFormat == ImageFormat::WEBP)
+                switch (imageFormat)
                 {
+                case ImageFormat::WEBP:
                     encodedData = encodeWebP(image);
-                }
-                else if (imageFormat == ImageFormat::JPEG)
-                {
+                    break;
+                case ImageFormat::JPEG:
                     encodedData = encodeJPEG(image);
-                }
-                else if (imageFormat == ImageFormat::PNG)
-                {
+                    break;
+                case ImageFormat::PNG:
                     encodedData = encodePNG(image);
-                }
-                else
-                {
-                    throw std::runtime_error("Invalid image format");
+                    break;
+                default:
+                    encodedData = encodeWebP(image);
+                    break;
                 }
 
                 int tmsY = (1 << zoom) - 1 - y;
@@ -242,99 +138,6 @@ void renderTiles(int processId, int numProcesses, int maxZoom, const char *style
 
     sqlite3_finalize(stmt);
     sqlite3_close(db);
-}
-
-void mergeDatabases(const std::vector<std::string> &dbPaths, const char *outputDbPath, ImageFormat imageFormat)
-{
-    sqlite3 *outDb;
-    int rc = sqlite3_open(outputDbPath, &outDb);
-    if (rc)
-    {
-        std::cerr << "Can't open output database: " << sqlite3_errmsg(outDb) << std::endl;
-        sqlite3_close(outDb);
-        exit(1);
-    }
-
-    initializeDatabase(outputDbPath, imageFormat);
-
-    rc = sqlite3_exec(outDb, "BEGIN TRANSACTION;", nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "Failed to begin transaction on output database: " << sqlite3_errmsg(outDb) << std::endl;
-    }
-
-    for (const auto &dbPath : dbPaths)
-    {
-        sqlite3 *inDb;
-        rc = sqlite3_open(dbPath.c_str(), &inDb);
-        if (rc)
-        {
-            std::cerr << "Can't open input database " << dbPath << ": " << sqlite3_errmsg(inDb) << std::endl;
-            sqlite3_close(inDb);
-            continue;
-        }
-
-        sqlite3_stmt *selectStmt;
-        const char *selectSQL = "SELECT zoom_level, tile_column, tile_row, tile_data FROM tiles;";
-        rc = sqlite3_prepare_v2(inDb, selectSQL, -1, &selectStmt, nullptr);
-        if (rc != SQLITE_OK)
-        {
-            std::cerr << "Failed to prepare select statement on " << dbPath << ": " << sqlite3_errmsg(inDb) << std::endl;
-            sqlite3_close(inDb);
-            continue;
-        }
-
-        const char *insertSQL = "INSERT OR IGNORE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?, ?, ?, ?);";
-        sqlite3_stmt *insertStmt;
-        rc = sqlite3_prepare_v2(outDb, insertSQL, -1, &insertStmt, nullptr);
-        if (rc != SQLITE_OK)
-        {
-            std::cerr << "Failed to prepare insert statement on output database: " << sqlite3_errmsg(outDb) << std::endl;
-            sqlite3_finalize(selectStmt);
-            sqlite3_close(inDb);
-            continue;
-        }
-
-        while ((rc = sqlite3_step(selectStmt)) == SQLITE_ROW)
-        {
-            int zoom_level = sqlite3_column_int(selectStmt, 0);
-            int tile_column = sqlite3_column_int(selectStmt, 1);
-            int tile_row = sqlite3_column_int(selectStmt, 2);
-            const void *tile_data = sqlite3_column_blob(selectStmt, 3);
-            int tile_data_size = sqlite3_column_bytes(selectStmt, 3);
-
-            sqlite3_bind_int(insertStmt, 1, zoom_level);
-            sqlite3_bind_int(insertStmt, 2, tile_column);
-            sqlite3_bind_int(insertStmt, 3, tile_row);
-            sqlite3_bind_blob(insertStmt, 4, tile_data, tile_data_size, SQLITE_TRANSIENT);
-
-            int insertRc = sqlite3_step(insertStmt);
-            if (insertRc != SQLITE_DONE)
-            {
-                std::cerr << "Failed to insert tile into output database: " << sqlite3_errmsg(outDb) << std::endl;
-            }
-
-            sqlite3_reset(insertStmt);
-            sqlite3_clear_bindings(insertStmt);
-        }
-
-        if (rc != SQLITE_DONE)
-        {
-            std::cerr << "Error while reading from " << dbPath << ": " << sqlite3_errmsg(inDb) << std::endl;
-        }
-
-        sqlite3_finalize(selectStmt);
-        sqlite3_finalize(insertStmt);
-        sqlite3_close(inDb);
-    }
-
-    rc = sqlite3_exec(outDb, "COMMIT;", nullptr, nullptr, nullptr);
-    if (rc != SQLITE_OK)
-    {
-        std::cerr << "Failed to commit transaction on output database: " << sqlite3_errmsg(outDb) << std::endl;
-    }
-
-    sqlite3_close(outDb);
 }
 
 int main(int argc, char *argv[])
@@ -413,7 +216,6 @@ int main(int argc, char *argv[])
 
     std::cout << ">>> Starting Rendering" << std::endl;
 
-    fs::path outputPath = fs::path(outputDbPath).parent_path();
     std::vector<pid_t> pids;
     std::vector<std::string> dbPaths;
 
@@ -421,12 +223,12 @@ int main(int argc, char *argv[])
 
     for (int processId = 0; processId < numProcesses; ++processId)
     {
-        fs::path dbPath = outputPath / ("output_" + std::to_string(processId) + ".mbtiles");
+        std::string dbPath = "/tmp/output_" + std::to_string(processId) + ".mbtiles";
 
         pid_t pid = fork();
         if (pid == 0)
         {
-            initializeDatabase(dbPath.c_str(), imageFormat);
+            createTemporaryTileDatabase(dbPath.c_str());
             renderTiles(processId, numProcesses, maxZoom, style_url.c_str(), imageFormat, dbPath.c_str());
             exit(0);
         }
@@ -453,7 +255,8 @@ int main(int argc, char *argv[])
     std::chrono::duration<double> elapsedTime = endTime - startTime;
     std::cout << ">>> Finished Rendering in " << elapsedTime.count() << " seconds." << std::endl;
 
-    mergeDatabases(dbPaths, outputDbPath.c_str(), imageFormat);
+    createMBTilesDatabase(outputDbPath.c_str(), imageFormat);
+    mergeMBTiles(dbPaths, outputDbPath.c_str());
 
     for (const auto &dbPath : dbPaths)
     {
